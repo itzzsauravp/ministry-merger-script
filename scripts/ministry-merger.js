@@ -1,6 +1,7 @@
 const db = require("../db");
 const validation = require("../helpers/validations");
 const password = require("../helpers/password");
+const Query = require("../lib/query");
 
 const data = [
     {
@@ -53,11 +54,12 @@ async function ministryMerger(mergerConfig) {
 
         // 1) Create new ministry i.e an entry for the
         console.log(`[Executing ${idx}]: Quering to create new ministry`);
-        const result1 = await db.query(
+        const result1 = await Query(
             `INSERT INTO ministries (name, nepali_name, code)
            VALUES ($1, $2, $3)
            RETURNING *;`,
             [ministry.name, ministry.nepali_name, ministry.code],
+            merger,
         );
         if (result1.rows.length)
             console.log(`[Success ${idx}]: New ministry created successfully`);
@@ -67,7 +69,7 @@ async function ministryMerger(mergerConfig) {
 
         // 2) Disable the one those were merged
         console.log(`[Executing ${idx}]: Disabling old ministries`);
-        const result2 = await db.query(
+        const result2 = await Query(
             `UPDATE ministries SET is_active = $1 WHERE name = ANY($2::text[]) RETURNING *`,
             [false, merger.merging],
         );
@@ -84,7 +86,7 @@ async function ministryMerger(mergerConfig) {
         console.log(
             `[Executing ${idx}]: Making previous ministry's admins inactive`,
         );
-        const result3_1 = await db.query(
+        const result3_1 = await Query(
             `
           UPDATE users SET status = $1 WHERE ministry_id = ANY($2::int[]) RETURNING *
         `,
@@ -98,7 +100,7 @@ async function ministryMerger(mergerConfig) {
         console.log(
             `[Executing ${idx}]: Creating new user to be the new ministry's admin`,
         );
-        const result3_2 = await db.query(
+        const result3_2 = await Query(
             `
             INSERT INTO users (ministry_id, username, password, first_name, middle_name, last_name, email, role)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *
@@ -124,7 +126,7 @@ async function ministryMerger(mergerConfig) {
         console.log(
             `[Executing ${idx}]: Transfering projects ownership to new ministry`,
         );
-        const result4 = await db.query(
+        const result4 = await Query(
             `UPDATE gates
            SET ministry_id = $1, department_id = $2, creator_id = $3
            WHERE ministry_id = ANY($4::int[])

@@ -29,121 +29,147 @@ async function ministryMerger(mergerConfig) {
         return;
     }
 
-    for (const [idx, merger] of mergerConfig.entries()) {
-        //TODO: Run data validations here first
+    await Query("BEGIN");
+    console.log("[Transaction]: Started transaction");
+    try {
+        for (const [idx, merger] of mergerConfig.entries()) {
+            //TODO: Run data validations here first
 
-        if (!Array.isArray(merger.merging)) {
-            console.log(`[Index ${idx}] Error merging: ${merger.merging}`);
-            console.error("Merging data must be an array");
-            return;
-        }
-        if (!validation.ministryKeyValidation(merger.to.ministry)) {
-            console.log(`[Index ${idx}} Error ministry: ${merger.to.ministry}`);
-            console.error("Merging data must be valid");
-            return;
-        }
-        if (!validation.userKeyValidation(merger.to.user)) {
-            console.log(`[Index ${idx}] Error user: ${merger.to.user}`);
-            console.error("User data must be valid");
-            return;
-        }
+            if (!Array.isArray(merger.merging)) {
+                console.log(`[Index ${idx}] Error merging: ${merger.merging}`);
+                console.error("Merging data must be an array");
+                return;
+            }
+            if (!validation.ministryKeyValidation(merger.to.ministry)) {
+                console.log(
+                    `[Index ${idx}} Error ministry: ${merger.to.ministry}`,
+                );
+                console.error("Merging data must be valid");
+                return;
+            }
+            if (!validation.userKeyValidation(merger.to.user)) {
+                console.log(`[Index ${idx}] Error user: ${merger.to.user}`);
+                console.error("User data must be valid");
+                return;
+            }
 
-        const { user, ministry } = merger.to;
+            const { user, ministry } = merger.to;
 
-        // MUST: Have to run it all under a single transaction
+            // MUST: Have to run it all under a single transaction
 
-        // 1) Create new ministry i.e an entry for the
-        console.log(`[Executing ${idx}]: Quering to create new ministry`);
-        const result1 = await Query(
-            `INSERT INTO ministries (name, nepali_name, code)
-           VALUES ($1, $2, $3)
-           RETURNING *;`,
-            [ministry.name, ministry.nepali_name, ministry.code],
-            merger,
-        );
-        if (result1.rows.length)
-            console.log(`[Success ${idx}]: New ministry created successfully`);
+            // 1) Create new ministry i.e an entry for the
+            console.log(`[Executing ${idx}]: Quering to create new ministry`);
+            const result1 = await Query(
+                `INSERT INTO ministries (name, nepali_name, code)
+             VALUES ($1, $2, $3)
+             RETURNING *;`,
+                [ministry.name, ministry.nepali_name, ministry.code],
+                merger,
+            );
+            if (result1.rows.length)
+                console.log(
+                    `[Success ${idx}]: New ministry created successfully`,
+                );
 
-        const newMinistry = result1.rows[0];
-        const newMinistryId = newMinistry.id;
+            const newMinistry = result1.rows[0];
+            const newMinistryId = newMinistry.id;
 
-        // 2) Disable the one those were merged
-        console.log(`[Executing ${idx}]: Disabling old ministries`);
-        const result2 = await Query(
-            `UPDATE ministries SET is_active = $1 WHERE name = ANY($2::text[]) RETURNING *`,
-            [false, merger.merging],
-        );
-        if (result2.rows.length)
-            console.log(`[Success ${idx}]: Disabled all ministries`);
+            // 2) Disable the one those were merged
+            console.log(`[Executing ${idx}]: Disabling old ministries`);
+            const result2 = await Query(
+                `UPDATE ministries SET is_active = $1 WHERE name = ANY($2::text[]) RETURNING *`,
+                [false, merger.merging],
+            );
+            if (result2.rows.length)
+                console.log(`[Success ${idx}]: Disabled all ministries`);
 
-        const disabledMinistryIds = result2.rows.map((row) => row.id);
-        console.log("Ministries being disabled", disabledMinistryIds);
+            const disabledMinistryIds = result2.rows.map((row) => row.id);
+            console.log("Ministries being disabled", disabledMinistryIds);
 
-        // Move the dataEntry users from the disabled ministries to the new ministry
-        for (const ministry of disabledMinistryIds) {
+            // Move the dataEntry users from the disabled ministries to the new ministry
             await Query(
-                `UPDATE users SET ministry_id = $1 WHERE ministry_id = $2 AND role = $3`,
-                [newMinistryId, ministry, "dataEntry"],
+                `UPDATE users SET ministry_id = $1 WHERE ministry_id = ANY($2::int[]) AND role = $3`,
+                [newMinistryId, disabledMinistryIds, "dataEntry"],
+            );
+
+            // 3) Set the the previous ministry admins status to inactive and ministry_id to null
+            // PLUS
+            // Create new user who will be ministry admin for the newly created department
+
+            console.log(
+                `[Executing ${idx}]: Making previous ministry's admins inactive`,
+            );
+            const result3_1 = await Query(
+                `
+            UPDATE users SET status = $1 WHERE ministry_id = ANY($2::int[]) RETURNING *
+          `,
+                ["inactive", disabledMinistryIds],
+            );
+            if (result3_1.rows.length)
+                console.log(
+                    `[Success ${idx}]: Previous ministries made inactive`,
+                );
+
+            const hashedPassword = await password.saltHashPassword(
+                user.password,
+            );
+
+            console.log(
+                `[Executing ${idx}]: Creating new user to be the new ministry's admin`,
+            );
+            const result3_2 = await Query(
+                `
+              INSERT INTO users (ministry_id, username, password, first_name, middle_name, last_name, email, role)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *
+          `,
+                [
+                    newMinistryId,
+                    user.username,
+                    hashedPassword,
+                    user.first_name,
+                    user.middle_name ?? null,
+                    user.last_name,
+                    user.email,
+                    "ministryAdmin",
+                ],
+            );
+            if (result3_2.rows.length)
+                console.log(`[Success ${idx}]: New ministry admin created`);
+
+            const newMinistryAdmin = result3_2.rows[0];
+            const newMinistryAdminsId = newMinistryAdmin.id;
+
+            // 4) Transfer all the projects ownership to the new ministry and update the depart_id in those projects to be null
+            console.log(
+                `[Executing ${idx}]: Transfering projects ownership to new ministry`,
+            );
+            const result4 = await Query(
+                `UPDATE gates
+             SET ministry_id = $1
+             WHERE ministry_id = ANY($2::int[])
+             RETURNING *`,
+                [newMinistryId, disabledMinistryIds],
+            );
+            console.log(
+                `[Success: ${idx}]: Transfering projects ownership to new ministry`,
+            );
+
+            // 5) Move departments from old ministry to new ministry
+            console.log(
+                `[Executing ${idx}]: Moving departments from old to new ministry`,
+            );
+            const result5 = await Query(
+                `UPDATE departments SET ministry_id = $1 WHERE ministry_id = ANY($2::int[]) RETURNING *`,
+                [newMinistryId, disabledMinistryIds],
             );
         }
-
-        // 3) Set the the previous ministry admins status to inactive and ministry_id to null
-        // PLUS
-        // Create new user who will be ministry admin for the newly created department
-
-        console.log(
-            `[Executing ${idx}]: Making previous ministry's admins inactive`,
-        );
-        const result3_1 = await Query(
-            `
-          UPDATE users SET status = $1 WHERE ministry_id = ANY($2::int[]) RETURNING *
-        `,
-            ["inactive", disabledMinistryIds],
-        );
-        if (result3_1.rows.length)
-            console.log(`[Success ${idx}]: Previous ministries made inactive`);
-
-        const hashedPassword = await password.saltHashPassword(user.password);
-
-        console.log(
-            `[Executing ${idx}]: Creating new user to be the new ministry's admin`,
-        );
-        const result3_2 = await Query(
-            `
-            INSERT INTO users (ministry_id, username, password, first_name, middle_name, last_name, email, role)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *
-        `,
-            [
-                newMinistryId,
-                user.username,
-                hashedPassword,
-                user.first_name,
-                user.middle_name ?? null,
-                user.last_name,
-                user.email,
-                "ministryAdmin",
-            ],
-        );
-        if (result3_2.rows.length)
-            console.log(`[Success ${idx}]: New ministry admin created`);
-
-        const newMinistryAdmin = result3_2.rows[0];
-        const newMinistryAdminsId = newMinistryAdmin.id;
-
-        // 4) Transfer all the projects ownership to the new ministry and update the depart_id in those projects to be null
-        console.log(
-            `[Executing ${idx}]: Transfering projects ownership to new ministry`,
-        );
-        const result4 = await Query(
-            `UPDATE gates
-           SET ministry_id = $1, department_id = $2
-           WHERE ministry_id = ANY($3::int[])
-           RETURNING *`,
-            [newMinistryId, null, disabledMinistryIds],
-        );
-        console.log(
-            `[Success: ${idx}]: Transfering projects ownership to new ministry`,
-        );
+        await Query("COMMIT");
+        console.log("[Transaction]: Ended transaction");
+    } catch (error) {
+        await Query("ROLLBACK");
+        console.error(`[Error]: ${error}`);
+    } finally {
+        //TODO: run release here
     }
 }
 

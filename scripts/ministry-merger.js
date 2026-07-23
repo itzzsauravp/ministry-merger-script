@@ -79,6 +79,14 @@ async function ministryMerger(mergerConfig) {
         const disabledMinistryIds = result2.rows.map((row) => row.id);
         console.log("Ministries being disabled", disabledMinistryIds);
 
+        // Move the dataEntry users from the disabled ministries to the new ministry
+        for (const ministry of disabledMinistryIds) {
+            await Query(
+                `UPDATE users SET ministry_id = $1 WHERE ministry_id = $2 AND role = $3`,
+                [newMinistryId, ministry, "dataEntry"],
+            );
+        }
+
         // 3) Set the the previous ministry admins status to inactive and ministry_id to null
         // PLUS
         // Create new user who will be ministry admin for the newly created department
@@ -128,10 +136,10 @@ async function ministryMerger(mergerConfig) {
         );
         const result4 = await Query(
             `UPDATE gates
-           SET ministry_id = $1, department_id = $2, creator_id = $3
-           WHERE ministry_id = ANY($4::int[])
+           SET ministry_id = $1, department_id = $2
+           WHERE ministry_id = ANY($3::int[])
            RETURNING *`,
-            [newMinistryId, null, newMinistryAdminsId, disabledMinistryIds],
+            [newMinistryId, null, disabledMinistryIds],
         );
         console.log(
             `[Success: ${idx}]: Transfering projects ownership to new ministry`,
